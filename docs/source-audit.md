@@ -96,7 +96,11 @@ datafeed 回调收到的包类型（sigsession.cpp:1393 `data_feed_in`；枚举 
 
 - 纯 C + Python 嵌入：源码清单 `libsigrokdecode4DSL/`（type_decoder.c 等，见顶层 CMakeLists.txt:482-500），顶层构建链接 `${PY_LIB}`（CMakeLists.txt:614-623）。解码器本体是 Python 包 `libsigrokdecode4DSL/decoders/`（i2c/spi/uart 等均在，安装到 share/libsigrokdecode4DSL，CMakeLists.txt:700）。
 - 解码器搜索路径可配置（`srd_decoder_load`/`SRD_DECODERS_DIR`），不依赖 GUI；上游最近一条提交（即我们所固定 HEAD）恰是"decoder 目录不存在时打印警告"，说明路径由宿主程序设置。
-- M1 不构建该库（避免 Python 嵌入依赖进入最小 PoC）；M3 离线解码时再引入或自行实现确定性解析器（届时按测试计划做 golden fixture 回归）。
+- **M3 实施偏差（已声明）**：计划"优先复用原有解码器"；实施时为确定性回归
+  （golden fixture 重放稳定）与避免 Python 嵌入进入最小构建，UART/I2C/SPI
+  解码器由本项目用 C 自研（src/decode.c），并用独立 Python 打包器做交叉验证
+  （tests/fixtures/gen_fixtures.py）。libsigrokdecode4DSL 保留为后续可选后端
+  （M5+）：接入时需加 Python 开发库依赖并复跑全部 golden 对拍。
 
 ## 9. 构建解耦 [源码确认 → 本项目方案]
 

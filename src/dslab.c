@@ -27,7 +27,7 @@
 #include "analyze_cmd.h"
 
 #ifndef DSLAB_VERSION
-#define DSLAB_VERSION "0.1.0-m1"
+#define DSLAB_VERSION "0.2.0"
 #endif
 
 static void print_error_json(const char *command, const char *code, const char *message)
@@ -870,6 +870,8 @@ int main(int argc, char **argv)
         return cmd_decode(argc - 2, argv + 2);
     if (!strcmp(cmd, "assert"))
         return cmd_assert(argc - 2, argv + 2);
+    if (!strcmp(cmd, "export"))
+        return cmd_export(argc - 2, argv + 2);
 
     usage(stderr);
     return EX_USAGE;

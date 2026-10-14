@@ -480,6 +480,118 @@ int cmd_decode(int argc, char **argv)
     return EX_USAGE;
 }
 
+/* ---------------- export (VCD) ---------------- */
+
+int cmd_export(int argc, char **argv)
+{
+    if (argc < 2) {
+        err_json("export", "INTERNAL_ERROR", "usage: export vcd <run> [-o file.vcd]");
+        return EX_USAGE;
+    }
+    if (strcmp(argv[0], "vcd") != 0) {
+        err_json("export", "INTERNAL_ERROR", "M5 supports 'vcd' only");
+        return EX_USAGE;
+    }
+    const char *dir = argv[1];
+    const char *out_path = arg_value(argc, argv, "-o");
+    dslab_run r;
+    char err[256];
+    if (run_load(dir, &r, err, sizeof(err)) != 0) {
+        err_json("export", "IO_ERROR", err);
+        return EX_CAPTURE;
+    }
+    char path[700];
+    if (out_path)
+        snprintf(path, sizeof(path), "%s", out_path);
+    else
+        snprintf(path, sizeof(path), "%s/capture.vcd", dir);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        run_free(&r);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "cannot write %s", path);
+        err_json("export", "IO_ERROR", msg);
+        return EX_CAPTURE;
+    }
+
+    char ts[40];
+    dslab_now_iso8601(ts);
+    fprintf(f, "$date %s $end\n", ts);
+    fprintf(f, "$version dslab export $end\n");
+    /* timescale: pick a unit that keeps timestamps integral */
+    const char *unit = "1 ns";
+    uint64_t unit_ps = 1000; /* picoseconds per unit */
+    /* samples -> ns exact only when rate divides 1e9; fall back to 1 ps */
+    if (1000000000ULL % r.rate_hz != 0) {
+        unit = "1 ps";
+        unit_ps = 1;
+    }
+    fprintf(f, "$timescale %s $end\n", unit);
+    fprintf(f, "$scope module dslogic $end\n");
+    for (int c = 0; c < r.channel_count; c++)
+        fprintf(f, "$var wire 1 %c %s $end\n", '!' + c, r.channels[c]);
+    fprintf(f, "$upscope $end\n");
+    fprintf(f, "$enddefinitions $end\n");
+    fprintf(f, "$dumpvars\n");
+    for (int c = 0; c < r.channel_count; c++)
+        fprintf(f, "%c%c\n", run_sample(&r, c, 0) ? '1' : '0', '!' + c);
+    fprintf(f, "$end\n");
+
+    /* single chronological pass over all channels' edge changes */
+    size_t group = (size_t)r.ch_slots * 8;
+    size_t groups = r.raw_len / group;
+    int prev[32];
+    for (int c = 0; c < r.channel_count; c++)
+        prev[c] = run_sample(&r, c, 0);
+
+    /* time conversion: t_ps(sample) = sample * 1e12 / rate, in unit_ps */
+    for (size_t g = 0; g < groups; g++) {
+        for (int c = 0; c < r.channel_count; c++) {
+            const uint8_t *base = r.raw + g * group + (size_t)c * 8;
+            for (unsigned b = 0; b < 8; b++) {
+                uint8_t byte = base[b];
+                uint64_t s0 = (uint64_t)g * 64 + b * 8;
+                for (unsigned bit = 0; bit < 8; bit++) {
+                    int lvl = (byte >> bit) & 1;
+                    if (lvl != prev[c] && s0 + bit > 0) {
+                        unsigned long long t =
+                            (unsigned long long)((((unsigned __int128)(s0 + bit) *
+                                                  1000000000000ULL) / r.rate_hz) /
+                                                 unit_ps);
+                        fprintf(f, "#%llu\n%c%c\n", t, lvl ? '1' : '0', '!' + c);
+                        prev[c] = lvl;
+                    }
+                }
+            }
+        }
+    }
+    unsigned long long tend = (unsigned long long)((((unsigned __int128)r.total_samples *
+                                                    1000000000000ULL) / r.rate_hz) / unit_ps);
+    fprintf(f, "#%llu\n", tend);
+    fclose(f);
+
+    JsonW w;
+    jw_init(&w, stdout);
+    jw_obj(&w);
+    jw_key_str(&w, "schema_version", "1.0");
+    jw_key_bool(&w, "ok", 1);
+    jw_key_str(&w, "command", "export.vcd");
+    jw_key_str(&w, "run_dir", dir);
+    jw_key_str(&w, "path", path);
+    jw_key_uint(&w, "samples", r.total_samples);
+    jw_key_uint(&w, "sample_rate_hz", r.rate_hz);
+    jw_key_str(&w, "timescale", unit);
+    jw_key_arr(&w, "warnings");
+    if (!r.complete)
+        jw_str(&w, "source capture was incomplete");
+    jw_arr_end(&w);
+    jw_obj_end(&w);
+    fputc('\n', stdout);
+    run_free(&r);
+    return EX_OK;
+}
+
 /* ---------------- assert ---------------- */
 
 int cmd_assert(int argc, char **argv)

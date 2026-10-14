@@ -9,5 +9,6 @@
 int cmd_analyze_timing(int argc, char **argv);
 int cmd_decode(int argc, char **argv);
 int cmd_assert(int argc, char **argv);
+int cmd_export(int argc, char **argv);
 
 #endif

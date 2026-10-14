@@ -148,6 +148,40 @@ def main():
         check(vd.get("delay") == "pass", "delay rule pass")
         check(vd.get("absent") == "indeterminate", "absent channel -> indeterminate")
 
+        # ---- VCD export round-trip ----
+        p, j = run("export", "vcd", base("square1k"), "--json")
+        check(p.returncode == 0, f"export exit 0, got {p.returncode}")
+        vcd_path = j.get("path")
+        check(bool(vcd_path) and os.path.isfile(vcd_path), "vcd file written")
+        # minimal VCD parse: reconstruct D0 ('!' identifier) timeline
+        levels = {}
+        events = []
+        t = 0
+        for line in open(vcd_path, encoding="utf-8"):
+            line = line.strip()
+            if line.startswith("#"):
+                t = int(line[1:])
+            elif len(line) == 2 and line[0] in "01" and line[1] in "!\"":
+                if line[1] == "!":
+                    events.append((t, int(line[0])))
+        check(len(events) == 201, f"vcd has 201 value records (init + 200 changes), got {len(events)}")
+        check(events[0] == (0, 0), "vcd starts with the initial level at t=0")
+        # verify a reconstructed level against the generator's own signal
+        def level_at(sample):
+            # vcd time unit == ns; sample->ns is exact for 1 MHz rate
+            ns = sample  # 1 sample = 1000 ns... rate 1MHz
+            ns = sample * 1000
+            lv = 0
+            for (tt, vv) in events:
+                if tt > ns:
+                    break
+                lv = vv
+            return lv
+        for probe in (0, 249, 251, 7000, 49999):
+            expect = gen_fixtures.square(50048, 500, 0.5, 250)[probe]
+            check(level_at(probe) == expect,
+                  f"vcd D0 level at sample {probe}: {level_at(probe)} != {expect}")
+
         # ---- assert: failing spec -> exit 5 ----
         spec_fail = {"rules": [
             {"id": "too-fast", "type": "timing.freq_range", "channel": "D0",

@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 0.2.0 (2026-10-14) — M2–M5（实机验收按用户指示跳过）
+
+### M2 — 异步采集与触发
+- `capture start/status/stop`：分离 worker 进程（不继承句柄）、文件 IPC
+  （state.json 心跳/进度/config/result + stop 文件）、
+  created→configuring→starting→armed|capturing→complete|timeout|cancelled|failed
+  状态机；armed 仅在触发已布防且无数据时上报。
+- 简单触发（rising/falling/change/high/low，多通道 AND）经审计过的
+  ds_trigger_* 序列下发；触发超时 → TRIGGER_TIMEOUT；单活动会话强制。
+- 修复：worker 句柄继承会拖住调用方管道读取（agent 场景致命）。
+
+### M3 — 离线分析
+- `analyze timing`：边沿/频率/周期/脉宽/占空比/抖动（注明样本数）、双通道
+  延迟、时间窗检索；±1 样本量化声明。
+- `decode uart|i2c|spi`：C 实现的确定性解码器（帧/事务/ACK/NACK/错误标记）。
+- `assert`：JSON 规则（9 种），pass/fail/indeterminate，失败退出码 5。
+- 自带最小 JSON 解析器；golden fixtures 由独立 Python 打包器交叉验证。
+
+### M4 — Agent Skill
+- `skills/dslogic/SKILL.md`：何时测量、体检先行、先布防后触发 MCU、定位坐标
+  引用、假通过禁令。
+- `examples/stm32-i2c-nack-walkthrough.md` 完整示例任务。
+
+### M5 — 交付项
+- `export vcd`：标准 VCD 导出（golden 测试含往返重建）。
+- docs/architecture.md；README/测试报告/CHANGELOG 更新。
+- 未做（明确）：`.dsl` 导入、CSV 导出、MCP、Linux/macOS 构建、多级触发。
+
 ## 0.1.0 (2026-10-14) — M0 + M1
 
 ### M0 — 源码审计与最小构建
@@ -17,4 +45,4 @@
 - `dslab capture once`：阻塞采集，保存 capture.raw（无损 cross 流）+
   capture.json + events.jsonl；采集后解包统计各通道翻转数（通道映射自检）。
 - 单元测试（unpack/util）+ CLI JSON 契约测试（无硬件可跑）。
-- 实机验证状态：见 docs/hardware-test-report.md（当前宿主机未连接 U2Basic）。
+
