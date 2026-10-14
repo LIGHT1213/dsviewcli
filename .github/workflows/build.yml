@@ -1,0 +1,89 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          pacboy: >-
+            gcc:p
+            cmake:p
+            ninja:p
+            pkg-config:p
+            glib2:p
+            libusb:p
+            zlib:p
+            python:p
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = "ci-${{ github.sha.Substring(0,7) }}"
+          if ("${{ github.ref_type }}" -eq "tag") { $ver = "${{ github.ref_name }}" }
+          $dir = "dist/dslab-$ver-win64"
+          New-Item -ItemType Directory -Force -Path "$dir/res" | Out-Null
+          Copy-Item build/dslab.exe, build/*.dll $dir
+          Copy-Item vendor/DSView/res/* $dir/res/
+          Copy-Item README.md, docs/device-setup.md, docs/cli.md $dir/
+          # 7-Zip is preinstalled on windows runners
+          7z a "dist/dslab-$ver-win64.7z" "$dir" | Out-Null
+          Compress-Archive -Path $dir -DestinationPath "dist/dslab-$ver-win64.zip"
+          Get-ChildItem dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dslab-win64
+          path: |
+            dist/*.zip
+            dist/*.7z
+          retention-days: 30
+
+  release:
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dslab-win64
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          files: |
+            dist/*.zip
+            dist/*.7z
+          body: |
+            Automated build from tag ${{ github.ref_name }} (commit ${{ github.sha }}).
+            Built and tested by GitHub Actions (MSYS2 UCRT64, ctest).
+            Archives are self-contained: dslab.exe + runtime DLLs + firmware/FPGA
+            resources (res/) + docs. Hardware acceptance status: see
+            docs/hardware-test-report.md in the repo.
