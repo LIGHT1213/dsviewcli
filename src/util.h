@@ -64,4 +64,11 @@ void dslab_sample_time_str(uint64_t sample_idx, uint64_t rate_hz, char *buf, siz
 /* Format a count of bytes human-friendly into buf ("1.5 MiB"). */
 void dslab_format_bytes(uint64_t bytes, char *buf, size_t bufsz);
 
+/* Firmware/FPGA resource directory resolution, in order:
+ *   1. $DSLAB_RES_DIR
+ *   2. <directory of the running exe>/res      (self-contained zip layout)
+ *   3. compiled-in DSLAB_RES_DIR_DEFAULT        (dev build tree)
+ * Returns a pointer to a static buffer; safe to call repeatedly. */
+const char *dslab_res_dir_resolve(void);
+
 #endif

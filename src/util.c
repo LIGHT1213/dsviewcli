@@ -16,6 +16,11 @@
 #include <time.h>
 #endif
 
+/* dslab_tests compiles util.c without the -D; keep it linkable */
+#ifndef DSLAB_RES_DIR_DEFAULT
+#define DSLAB_RES_DIR_DEFAULT "."
+#endif
+
 uint64_t dslab_parse_duration_ns(const char *s, int *ok)
 {
     *ok = 0;
@@ -222,6 +227,45 @@ void dslab_sample_time_str(uint64_t sample_idx, uint64_t rate_hz, char *buf, siz
     /* Exact integer decomposition: whole ns = sample_idx * 1e9 / rate */
     unsigned long long ns = (unsigned long long)(((unsigned __int128)sample_idx * 1000000000ULL) / rate_hz);
     snprintf(buf, bufsz, "%llu.%06llu ms", ns / 1000000ULL, (ns / 1000ULL) % 1000ULL);
+}
+
+const char *dslab_res_dir_resolve(void)
+{
+    static char buf[1024];
+    const char *env = getenv("DSLAB_RES_DIR");
+    if (env && *env)
+        return env;
+
+#ifdef _WIN32
+    char exe[1024];
+    if (GetModuleFileNameA(NULL, exe, sizeof(exe))) {
+        char *slash = strrchr(exe, '\\');
+        if (!slash)
+            slash = strrchr(exe, '/');
+        if (slash) {
+            *slash = '\0';
+            snprintf(buf, sizeof(buf), "%s\\res", exe);
+            struct stat st;
+            if (stat(buf, &st) == 0 && (st.st_mode & S_IFDIR))
+                return buf;
+        }
+    }
+#else
+    ssize_t nl = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (nl > 0) {
+        buf[nl] = '\0';
+        char *slash = strrchr(buf, '/');
+        if (slash) {
+            *slash = '\0';
+            size_t off = strlen(buf);
+            snprintf(buf + off, sizeof(buf) - off, "/res");
+            struct stat st;
+            if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode))
+                return buf;
+        }
+    }
+#endif
+    return DSLAB_RES_DIR_DEFAULT;
 }
 
 void dslab_format_bytes(uint64_t bytes, char *buf, size_t bufsz)

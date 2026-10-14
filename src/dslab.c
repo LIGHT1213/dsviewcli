@@ -124,9 +124,7 @@ static int cmd_devices(int json)
 static int cmd_capabilities(const char *device_hint, int json)
 {
     const char *command = "capabilities";
-    const char *res_dir = getenv("DSLAB_RES_DIR");
-    if (!res_dir || !*res_dir)
-        res_dir = DSLAB_RES_DIR_DEFAULT;
+    const char *res_dir = dslab_res_dir_resolve();
 
     int rc = dsl_global_init(res_dir);
     if (rc != SR_OK && rc != SR_ERR_HAVE_DONE) {
@@ -232,9 +230,7 @@ static int cmd_capabilities(const char *device_hint, int json)
 static int cmd_doctor(int json)
 {
     const char *command = "doctor";
-    const char *res_dir = getenv("DSLAB_RES_DIR");
-    if (!res_dir || !*res_dir)
-        res_dir = DSLAB_RES_DIR_DEFAULT;
+    const char *res_dir = dslab_res_dir_resolve();
 
     int checks_fail = 0;
 

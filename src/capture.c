@@ -330,9 +330,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
     snprintf(path_meta, sizeof(path_meta), "%s/capture.json", run_dir);
 
     /* ---- library setup ---- */
-    const char *res_dir = getenv("DSLAB_RES_DIR");
-    if (!res_dir || !*res_dir)
-        res_dir = DSLAB_RES_DIR_DEFAULT;
+    const char *res_dir = dslab_res_dir_resolve();
     int rc = dsl_global_init(res_dir);
     if (rc != SR_OK && rc != SR_ERR_HAVE_DONE) {
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_INTERNAL);
