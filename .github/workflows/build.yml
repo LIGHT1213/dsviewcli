@@ -42,9 +42,14 @@ jobs:
 
       - name: Package
         shell: pwsh
+        env:
+          SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $ver = "ci-${{ github.sha.Substring(0,7) }}"
-          if ("${{ github.ref_type }}" -eq "tag") { $ver = "${{ github.ref_name }}" }
+          # GitHub expressions have no substring; shorten the SHA in pwsh
+          $ver = "ci-" + $env:SHA.Substring(0,7)
+          if ($env:REF_TYPE -eq "tag") { $ver = $env:REF_NAME }
           $dir = "dist/dslab-$ver-win64"
           New-Item -ItemType Directory -Force -Path "$dir/res" | Out-Null
           Copy-Item build/dslab.exe, build/*.dll $dir
