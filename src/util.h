@@ -49,6 +49,12 @@ void dslab_now_iso8601(char buf[40]);
 /* Monotonic-ish wall clock in ms (GetTickCount64 / clock_gettime). */
 uint64_t dslab_now_ms(void);
 
+/* Wall-clock UTC in unix epoch milliseconds (for heartbeats). */
+uint64_t dslab_unix_ms(void);
+
+/* Current process id as long (portable). */
+long dslab_getpid(void);
+
 void dslab_sleep_ms(unsigned ms);
 
 /* Sample index -> time string in seconds with fixed precision (no

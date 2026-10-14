@@ -79,6 +79,8 @@ add_executable(dslab
     src/usb_scan.c
     src/dsl_session.c
     src/capture.c
+    src/trigger.c
+    src/session_mgr.c
     src/unpack.c
 )
 target_compile_definitions(dslab PRIVATE DSLAB_RES_DIR_DEFAULT="${DSLAB_RES_DIR_DEFAULT}")
@@ -104,8 +106,10 @@ enable_testing()
 add_executable(dslab_tests
     tests/unit/test_unpack.c
     tests/unit/test_util.c
+    tests/unit/test_trigger.c
     src/unpack.c
     src/util.c
+    src/trigger.c
 )
 target_include_directories(dslab_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME unit COMMAND dslab_tests)
@@ -117,4 +121,6 @@ if(Python3_FOUND)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_cli_contract.py $<TARGET_FILE:dslab>)
   add_test(NAME demo_pipeline
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_demo_pipeline.py $<TARGET_FILE:dslab>)
+  add_test(NAME async_lifecycle
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_async_lifecycle.py $<TARGET_FILE:dslab>)
 endif()

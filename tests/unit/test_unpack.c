@@ -128,6 +128,7 @@ static void test_golden_stream(void)
 }
 
 int test_util_run(void); /* tests/unit/test_util.c */
+int test_trigger_run(void); /* tests/unit/test_trigger.c */
 
 int main(void)
 {
@@ -138,10 +139,11 @@ int main(void)
     test_extract();
     test_golden_stream();
     failures += test_util_run();
+    failures += test_trigger_run();
     if (failures) {
         fprintf(stderr, "%d unit test failure(s)\n", failures);
         return 1;
     }
-    printf("unit tests (unpack+util): all passed\n");
+    printf("unit tests (unpack+util+trigger): all passed\n");
     return 0;
 }

@@ -181,6 +181,32 @@ uint64_t dslab_now_ms(void)
 #endif
 }
 
+uint64_t dslab_unix_ms(void)
+{
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100ns ticks since 1601-01-01 -> unix ms */
+    return (u.QuadPart - 116444736000000000ULL) / 10000ULL;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000);
+#endif
+}
+
+long dslab_getpid(void)
+{
+#ifdef _WIN32
+    return (long)GetCurrentProcessId();
+#else
+    return (long)getpid();
+#endif
+}
+
 void dslab_sleep_ms(unsigned ms)
 {
 #ifdef _WIN32

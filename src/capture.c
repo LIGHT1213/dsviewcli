@@ -2,6 +2,7 @@
 #include "dsl_session.h"
 #include "jsonw.h"
 #include "unpack.h"
+#include "session_mgr.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,15 +43,46 @@ static struct {
     volatile int device_running;
 } cap;
 
-static void ev_log(const char *event, const char *detail)
+/* worker hooks (NULL for capture-once) */
+static struct {
+    int active;
+    char dir[512];
+    char id[32];
+    long pid;
+    char *config_fld;
+} wk;
+
+static void ev_log(const char *event, const char *detail_json)
 {
     if (!cap.events)
         return;
     char ts[40];
     dslab_now_iso8601(ts);
     fprintf(cap.events, "{\"ts\":\"%s\",\"event\":\"%s\"%s%s}\n",
-            ts, event, detail ? ",\"detail\":" : "", detail ? detail : "");
+            ts, event, detail_json ? ",\"detail\":" : "",
+            detail_json ? detail_json : "");
     fflush(cap.events);
+}
+
+static void wk_state(const char *state)
+{
+    if (!wk.active)
+        return;
+    ses_touch_heartbeat(wk.dir, wk.id, wk.pid, state, cap.bytes_seen, cap.bytes_seen, wk.config_fld);
+    if (cap.events) {
+        ev_log(state, NULL);
+    } else {
+        /* state can change before events.jsonl is opened (e.g. configuring) */
+        char path[600];
+        snprintf(path, sizeof(path), "%s/events.jsonl", wk.dir);
+        FILE *f = fopen(path, "ab");
+        if (f) {
+            char ts[40];
+            dslab_now_iso8601(ts);
+            fprintf(f, "{\"ts\":\"%s\",\"event\":\"%s\"}\n", ts, state);
+            fclose(f);
+        }
+    }
 }
 
 static void on_ds_event(int event)
@@ -94,11 +126,9 @@ static void on_datafeed(const struct sr_dev_inst *sdi,
         } else {
             cap.packet_errors++;
         }
-        char detail[128];
-        snprintf(detail, sizeof(detail), "\"remain_cnt\":%llu",
-                 (unsigned long long)cap.trigger_remain_cnt);
         char full[192];
-        snprintf(full, sizeof(full), "{%s}", detail);
+        snprintf(full, sizeof(full), "{\"remain_cnt\":%llu}",
+                 (unsigned long long)cap.trigger_remain_cnt);
         ev_log("df_trigger", full);
         break;
     }
@@ -176,25 +206,108 @@ static const dslab_stream_mode *select_stream_mode(const dslab_capture_opts *o,
     return best;
 }
 
+/* Configure the hardware trigger via the audited simple-trigger sequence:
+ * reset → set_en → per-probe chars ('X' for don't-care) → position. */
+static int apply_trigger(const dslab_capture_opts *o, struct ds_device_full_info *devinfo)
+{
+    ds_trigger_reset();
+    if (o->trig.count == 0)
+        return 0; /* hardware auto-triggers immediately */
+
+    ds_trigger_set_en(1);
+    for (GSList *l = dsl_channels(); l; l = l->next) {
+        struct sr_channel *ch = l->data;
+        if (!ch->enabled)
+            continue;
+        char tc = 'X';
+        for (int i = 0; i < o->trig.count; i++)
+            if (o->trig.items[i].ch_index == ch->index)
+                tc = o->trig.items[i].trig_char;
+        ds_trigger_probe_set(ch->index, (unsigned char)tc, (unsigned char)'X');
+    }
+    int pos = o->trig.position_pct;
+    if (pos < 0) pos = 0;
+    if (pos > 100) pos = 100;
+    ds_trigger_set_pos((uint16_t)pos);
+    (void)devinfo;
+    return 0;
+}
+
+static char *build_config_fld(const dslab_capture_opts *o, uint64_t limit_samples,
+                              const char *mode_name, int ch_en, uint64_t timeout_ms)
+{
+    char *buf = malloc(2048);
+    if (!buf)
+        return NULL;
+    char chans[256] = "";
+    size_t off = 0;
+    for (int i = 0; i < o->channel_count; i++)
+        off += (size_t)snprintf(chans + off, sizeof(chans) - off, "%sD%d",
+                                i ? "," : "", o->channels[i]);
+    char trigstr[256] = "";
+    if (o->trig.count) {
+        off = 0;
+        for (int i = 0; i < o->trig.count; i++)
+            off += (size_t)snprintf(trigstr + off, sizeof(trigstr) - off, "%sD%d:%c",
+                                    i ? "," : "", o->trig.items[i].ch_index,
+                                    o->trig.items[i].trig_char);
+    }
+    snprintf(buf, 2048,
+             "{\"device\":\"%s\",\"channels\":\"%s\",\"rate_hz\":%llu,"
+             "\"duration_ms\":%llu,\"limit_samples\":%llu,\"mode\":\"%s\","
+             "\"channel_mode\":\"%s\",\"ch_enabled\":%d,"
+             "\"timeout_ms\":%llu,\"trigger\":{\"spec\":\"%s\",\"position_pct\":%d}}",
+             o->device_hint ? o->device_hint : "auto", chans,
+             (unsigned long long)o->rate_hz,
+             (unsigned long long)(o->duration_ns / 1000000ULL),
+             (unsigned long long)limit_samples,
+             o->mode ? o->mode : "stream", mode_name, ch_en,
+             (unsigned long long)timeout_ms, trigstr, o->trig.position_pct);
+    return buf;
+}
+
 int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res)
 {
     char errbuf[512] = "";
     memset(&cap, 0, sizeof(cap));
     memset(res, 0, sizeof(*res));
-    res->error_code[0] = '\0';
-    res->error_msg[0] = '\0';
-    res->run_dir[0] = '\0';
+    memset(&wk, 0, sizeof(wk));
+    if (opts->worker_mode) {
+        wk.active = 1;
+        snprintf(wk.id, sizeof(wk.id), "%s", opts->session_id);
+        snprintf(wk.dir, sizeof(wk.dir), "runs/%s", opts->session_id);
+        wk.pid = dslab_getpid();
+    }
 
     if (strcmp(opts->mode ? opts->mode : "stream", "stream") != 0) {
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
         snprintf(res->error_msg, sizeof(res->error_msg),
-                 "mode '%s' not supported in M1 (only 'stream')", opts->mode);
+                 "mode '%s' not supported in M1/M2 (only 'stream')", opts->mode);
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
+    }
+
+    /* Trigger channels must be among the enabled capture channels. */
+    for (int i = 0; i < opts->trig.count; i++) {
+        int found = 0;
+        for (int c = 0; c < opts->channel_count; c++)
+            if (opts->channels[c] == opts->trig.items[i].ch_index)
+                found = 1;
+        if (!found) {
+            snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
+            snprintf(res->error_msg, sizeof(res->error_msg),
+                     "trigger channel D%d is not in the enabled channel set",
+                     opts->trig.items[i].ch_index);
+            snprintf(res->final_state, sizeof(res->final_state), "failed");
+            return EX_CAPTURE;
+        }
     }
 
     /* ---- run directory ---- */
     char run_dir[512];
-    if (opts->output_dir && *opts->output_dir) {
+    if (opts->worker_mode) {
+        snprintf(run_dir, sizeof(run_dir), "runs/%s", opts->session_id);
+    } else if (opts->output_dir && *opts->output_dir) {
         snprintf(run_dir, sizeof(run_dir), "%s", opts->output_dir);
     } else {
         char ts[40];
@@ -208,6 +321,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_IO);
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "cannot create run dir '%s': %s", run_dir, strerror(errno));
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
     char path_raw[600], path_events[600], path_meta[600];
@@ -224,10 +338,12 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_INTERNAL);
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "ds_lib_init failed rc=%d", rc);
-        return EX_DEVICE;
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
+        goto fail_device;
     }
     ds_set_event_callback(on_ds_event);
     ds_set_datafeed_callback(on_datafeed);
+    wk_state("configuring");
 
     struct ds_device_full_info devinfo;
     memset(&devinfo, 0, sizeof(devinfo));
@@ -238,6 +354,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "no usable USB device found (hint='%s')",
                  opts->device_hint ? opts->device_hint : "auto");
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_DEVICE;
     }
 
@@ -250,6 +367,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         dsl_global_exit();
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_INTERNAL);
         snprintf(res->error_msg, sizeof(res->error_msg), "set DEVICE_MODE=LOGIC failed");
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_DEVICE;
     }
     if (!is_demo &&
@@ -257,6 +375,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         dsl_global_exit();
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_INTERNAL);
         snprintf(res->error_msg, sizeof(res->error_msg), "set OPERATION_MODE=STREAM failed");
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_DEVICE;
     }
 
@@ -275,6 +394,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
             dsl_global_exit();
             snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
             snprintf(res->error_msg, sizeof(res->error_msg), "%s", errbuf);
+            snprintf(res->final_state, sizeof(res->final_state), "failed");
             return EX_CAPTURE;
         }
         if (dsl_cfg_set_i16(SR_CONF_CHANNEL_MODE, (int16_t)mode->id) != SR_OK) {
@@ -282,6 +402,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
             snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
             snprintf(res->error_msg, sizeof(res->error_msg),
                      "device rejected channel mode '%s'", mode->name);
+            snprintf(res->final_state, sizeof(res->final_state), "failed");
             return EX_CAPTURE;
         }
     }
@@ -301,6 +422,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "enabled %d channels but expected %d", ch_en, opts->channel_count);
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
 
@@ -328,6 +450,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
                 snprintf(res->error_msg, sizeof(res->error_msg),
                          "rate %llu Hz is not in the device samplerate list (%zu rates)",
                          (unsigned long long)opts->rate_hz, n);
+                snprintf(res->final_state, sizeof(res->final_state), "failed");
                 return EX_CAPTURE;
             }
         }
@@ -345,6 +468,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_UNSUPPORTED_CONFIG);
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "device rejected samplerate/limit config");
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
     /* Read back what the device now reports. */
@@ -356,8 +480,12 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "samplerate readback %llu != requested %llu",
                  (unsigned long long)rate_now, (unsigned long long)opts->rate_hz);
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
+
+    /* ---- trigger (before acquisition start; audited sequence) ---- */
+    apply_trigger(opts, &devinfo);
 
     /* ---- expected sample accounting (mirrors driver alignment) ---- */
     /* Real hardware rounds the sample count up to a multiple of 1024
@@ -369,7 +497,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
     uint64_t actual_bytes = actual_samples / 64ULL * (uint64_t)ch_en * 8ULL;
 
     cap.raw = fopen(path_raw, "wb");
-    cap.events = fopen(path_events, "wb");
+    cap.events = fopen(path_events, "ab"); /* append: wk_state may have logged early */
     if (!cap.raw || !cap.events) {
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_IO);
         snprintf(res->error_msg, sizeof(res->error_msg), "cannot open output files in %s", run_dir);
@@ -377,26 +505,30 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         if (cap.events) fclose(cap.events);
         cap.raw = cap.events = NULL;
         dsl_global_exit();
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
     snprintf(res->run_dir, sizeof(res->run_dir), "%s", run_dir);
+
+    uint64_t timeout_ms = opts->timeout_ms ? opts->timeout_ms
+                          : (opts->duration_ns / 1000000ULL) * 10ULL + 5000ULL;
+    wk.config_fld = build_config_fld(opts, limit_samples, mode->name, ch_en, timeout_ms);
 
     char ts0[40];
     dslab_now_iso8601(ts0);
     fprintf(cap.events, "{\"ts\":\"%s\",\"event\":\"armed_config\",\"rate_hz\":%llu,"
             "\"limit_samples\":%llu,\"actual_samples\":%llu,\"actual_bytes\":%llu,"
-            "\"channels\":%d,\"channel_mode\":\"%s\"}\n",
+            "\"channels\":%d,\"channel_mode\":\"%s\",\"trigger_en\":%d}\n",
             ts0, (unsigned long long)opts->rate_hz,
             (unsigned long long)limit_samples,
             (unsigned long long)actual_samples,
             (unsigned long long)actual_bytes,
-            ch_en, mode->name);
+            ch_en, mode->name, opts->trig.count > 0);
     fflush(cap.events);
 
     /* ---- run ---- */
     uint64_t t_start = dslab_now_ms();
-    uint64_t timeout_ms = opts->timeout_ms ? opts->timeout_ms
-                          : (opts->duration_ns / 1000000ULL) * 10ULL + 5000ULL;
+    wk_state("starting");
     rc = ds_start_collect();
     if (rc != SR_OK) {
         fclose(cap.raw); fclose(cap.events);
@@ -405,21 +537,59 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         dsl_global_exit();
         if (last == SR_ERR_DEVICE_IS_EXCLUSIVE) {
             snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_DEVICE_BUSY);
+            snprintf(res->final_state, sizeof(res->final_state), "failed");
             return EX_DEVICE;
         }
         snprintf(res->error_code, sizeof(res->error_code), "%s", DSLAB_E_ARM_TIMEOUT);
         snprintf(res->error_msg, sizeof(res->error_msg),
                  "ds_start_collect failed rc=%d (%s)", rc, dsl_last_error_str(rc));
+        snprintf(res->final_state, sizeof(res->final_state), "failed");
         return EX_CAPTURE;
     }
 
+    /* armed vs capturing: with a user trigger configured, the device is
+     * "armed" once running and before any data packet arrives; without a
+     * trigger it is capturing immediately (hardware auto-triggers). */
+    int announced_armed = 0;
+    int stop_by_user = 0;
+    int timeout_hit = 0;
+    uint64_t last_heartbeat = 0;
+
     while (!cap.collect_ended) {
         dslab_sleep_ms(5);
-        if (dslab_now_ms() - t_start > timeout_ms) {
-            ev_log("timeout_hit", NULL);
+        uint64_t now = dslab_now_ms();
+        if (wk.active && !announced_armed && cap.device_running) {
+            if (opts->trig.count > 0) {
+                wk_state("armed");
+            } else {
+                wk_state("capturing");
+            }
+            announced_armed = 1;
+        }
+        if (wk.active && !announced_armed && cap.bytes_seen > 0)
+            announced_armed = 1; /* data before running event: treat as capturing */
+        if (wk.active && now - last_heartbeat > 200) {
+            last_heartbeat = now;
+            ses_touch_heartbeat(wk.dir, wk.id, wk.pid,
+                                opts->trig.count > 0 && cap.bytes_seen == 0
+                                    ? "armed" : "capturing",
+                                cap.bytes_seen,
+                                ch_en ? cap.bytes_seen / (uint64_t)ch_en * 8ULL : 0,
+                                wk.config_fld);
+        }
+        if (wk.active && ses_stop_requested(wk.dir)) {
+            ev_log("stop_requested", NULL);
+            stop_by_user = 1;
             ds_stop_collect();
-            /* give the collect thread a moment to wind down */
-            for (int i = 0; i < 200 && !cap.collect_ended; i++)
+            for (int i = 0; i < 400 && !cap.collect_ended; i++)
+                dslab_sleep_ms(5);
+            break;
+        }
+        if (now - t_start > timeout_ms) {
+            ev_log("timeout_hit", NULL);
+            timeout_hit = 1;
+            ds_stop_collect();
+            for (int i = 0; i < 400 && !cap.collect_ended; i++)
                 dslab_sleep_ms(5);
             break;
         }
@@ -458,13 +628,45 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
     dsl_release();
     dsl_global_exit();
 
-    /* ---- write capture.json ---- */
+    /* ---- terminal state decision ---- */
     int incomplete = samples_received < actual_samples;
+    int trigger_armed = opts->trig.count > 0;
+    const char *final_state = "complete";
+    const char *err_code = NULL;
+    if (cap.collect_error) {
+        final_state = "failed";
+        err_code = DSLAB_E_INTERNAL;
+    } else if (cap.collect_detached) {
+        final_state = "failed";
+        err_code = DSLAB_E_USB_DISCONNECTED;
+    } else if (stop_by_user) {
+        final_state = "cancelled";
+    } else if (timeout_hit) {
+        final_state = "timeout";
+        if (trigger_armed && !(cap.have_trigger && cap.trigger_check_ok))
+            err_code = DSLAB_E_TRIGGER_TIMEOUT;
+        else if (incomplete)
+            err_code = DSLAB_E_INCOMPLETE;
+    } else if (incomplete) {
+        err_code = DSLAB_E_INCOMPLETE;
+    }
+    if (cap.overflow && !err_code)
+        err_code = DSLAB_E_OVERFLOW;
+
     int static_all = 1;
     for (int i = 0; i < ch_en; i++)
         if (stats && stats[i].transitions)
             static_all = 0;
+    int trigger_hit = (cap.have_trigger && cap.trigger_check_ok);
 
+    snprintf(res->final_state, sizeof(res->final_state), "%s", final_state);
+    res->trigger_hit = trigger_hit;
+    res->samples = samples_received;
+    res->bytes = bytes_on_disk;
+    if (err_code)
+        snprintf(res->error_code, sizeof(res->error_code), "%s", err_code);
+
+    /* ---- write capture.json ---- */
     FILE *fm = fopen(path_meta, "wb");
     if (fm) {
         JsonW m;
@@ -472,7 +674,9 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         jw_obj(&m);
         jw_key_str(&m, "schema_version", "1.0");
         jw_key_str(&m, "tool", "dslab");
-        jw_key_str(&m, "command", "capture.once");
+        jw_key_str(&m, "command", opts->worker_mode ? "capture.worker" : "capture.once");
+        if (opts->worker_mode)
+            jw_key_str(&m, "session_id", opts->session_id);
         char tsb[40];
         dslab_now_iso8601(tsb);
         jw_key_str(&m, "created", tsb);
@@ -498,6 +702,7 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         jw_key_str(&m, "mode", "stream");
         jw_key_str(&m, "channel_mode", mode->name);
         jw_key_uint(&m, "duration_ms", opts->duration_ns / 1000000ULL);
+        jw_key_uint(&m, "timeout_ms", timeout_ms);
         jw_key_uint(&m, "elapsed_ms", t_end - t_start);
         jw_key_str(&m, "raw_path", "capture.raw");
         jw_key_str(&m, "events_path", "events.jsonl");
@@ -510,93 +715,128 @@ int dslab_capture_once(const dslab_capture_opts *opts, dslab_capture_result *res
         }
         jw_arr_end(&m);
         jw_key_obj(&m, "trigger");
-        jw_key_bool(&m, "triggered", cap.have_trigger && cap.trigger_check_ok);
+        jw_key_bool(&m, "configured", trigger_armed);
+        if (trigger_armed) {
+            jw_key_str(&m, "spec", opts->trig_spec_str ? opts->trig_spec_str : "");
+            jw_key_int(&m, "position_pct", opts->trig.position_pct);
+        }
+        jw_key_bool(&m, "triggered", trigger_hit);
         jw_key_uint(&m, "remain_cnt", cap.trigger_remain_cnt);
-        jw_key_str(&m, "note", "no user trigger configured in M1; hardware auto-triggers");
         jw_key_end(&m);
         jw_key_obj(&m, "integrity");
         jw_key_bool(&m, "complete", !incomplete);
         jw_key_bool(&m, "overflow", cap.overflow);
         jw_key_bool(&m, "packet_errors", cap.packet_errors != 0);
         jw_key_bool(&m, "static_waveform", static_all);
+        jw_key_str(&m, "final_state", final_state);
         jw_key_end(&m);
         jw_obj_end(&m);
         fclose(fm);
     }
 
-    free(stats);
+    /* ---- worker: final state.json ---- */
+    if (wk.active) {
+        char result_fld[1024];
+        snprintf(result_fld, sizeof(result_fld),
+                 "{\"sample_count\":%llu,\"byte_count\":%llu,\"elapsed_ms\":%llu,"
+                 "\"triggered\":%s,\"ok\":%s,\"error\":%s%s%s}",
+                 (unsigned long long)samples_received,
+                 (unsigned long long)bytes_on_disk,
+                 (unsigned long long)(t_end - t_start),
+                 trigger_hit ? "true" : "false",
+                 (!err_code && !incomplete) ? "true" : "false",
+                 err_code ? "{\"code\":\"" : "null",
+                 err_code ? err_code : "",
+                 err_code ? "\"}" : "");
+        ses_write_state(wk.dir, wk.id, final_state, wk.pid, wk.config_fld,
+                        bytes_on_disk, samples_received, result_fld);
+        ev_log(final_state, NULL);
+    }
 
-    /* ---- stdout JSON result ---- */
-    JsonW w;
-    jw_init(&w, stdout);
-    jw_obj(&w);
-    jw_key_str(&w, "schema_version", "1.0");
-    jw_key_bool(&w, "ok", !incomplete && !cap.overflow && !cap.collect_error &&
-                        !cap.collect_detached && !cap.packet_errors);
-    jw_key_str(&w, "command", "capture.once");
-    jw_key_obj(&w, "device");
-    jw_key_str(&w, "model", devinfo.name);
-    jw_key_end(&w);
-    jw_key_uint(&w, "sample_rate_hz", rate_now ? rate_now : opts->rate_hz);
-    jw_key_str(&w, "channel_mode", mode->name);
-    jw_key_arr(&w, "channels");
-    for (int i = 0; i < opts->channel_count; i++) {
-        char nm[8];
-        snprintf(nm, sizeof(nm), "D%d", opts->channels[i]);
-        jw_str(&w, nm);
-    }
-    jw_arr_end(&w);
-    jw_key_obj(&w, "capture");
-    jw_key_str(&w, "raw_path", path_raw);
-    jw_key_str(&w, "meta_path", path_meta);
-    jw_key_uint(&w, "sample_count", samples_received);
-    jw_key_uint(&w, "byte_count", bytes_on_disk);
-    jw_key_uint(&w, "elapsed_ms", t_end - t_start);
-    jw_key_end(&w);
-    jw_key_obj(&w, "channels_detail");
-    for (int i = 0; i < ch_en; i++) {
-        char nm[8];
-        snprintf(nm, sizeof(nm), "D%d", opts->channels[i]);
-        jw_key_obj(&w, nm);
-        jw_key_uint(&w, "transitions", stats ? stats[i].transitions : 0);
-        jw_key_uint(&w, "rising", stats ? stats[i].rising : 0);
-        jw_key_uint(&w, "falling", stats ? stats[i].falling : 0);
-        jw_key_int(&w, "first_edge_sample", stats ? stats[i].first_edge_sample : -1);
+    /* ---- stdout JSON result (capture once only) ---- */
+    int exit_code;
+    if (err_code && strcmp(err_code, DSLAB_E_INCOMPLETE) == 0)
+        exit_code = EX_CAPTURE;
+    else if (err_code)
+        exit_code = strcmp(err_code, DSLAB_E_DEVICE_BUSY) == 0 ? EX_DEVICE : EX_CAPTURE;
+    else if (cap.collect_error || cap.collect_detached)
+        exit_code = EX_CAPTURE;
+    else if (stop_by_user)
+        exit_code = EX_OK; /* user stop is a controlled outcome */
+    else
+        exit_code = EX_OK;
+
+    if (!wk.active) {
+        JsonW w;
+        jw_init(&w, stdout);
+        jw_obj(&w);
+        jw_key_str(&w, "schema_version", "1.0");
+        jw_key_bool(&w, "ok", err_code == NULL && !cap.collect_error && !cap.collect_detached);
+        jw_key_str(&w, "command", "capture.once");
+        jw_key_str(&w, "state", final_state);
+        jw_key_obj(&w, "device");
+        jw_key_str(&w, "model", devinfo.name);
         jw_key_end(&w);
-    }
-    jw_key_end(&w);
-    jw_key_arr(&w, "warnings");
-    if (incomplete) jw_str(&w, "INCOMPLETE_CAPTURE: fewer samples than expected");
-    if (cap.overflow) jw_str(&w, "CAPTURE_OVERFLOW: device reported stream overflow");
-    if (static_all) jw_str(&w, "no transitions on any channel (static or unconnected input?)");
-    if (cap.collect_error) jw_str(&w, "collect task ended with error");
-    if (cap.collect_detached) jw_str(&w, "USB device detached during capture");
-    if (cap.packet_errors) jw_str(&w, "malformed packets received");
-    jw_arr_end(&w);
-    if (incomplete || cap.collect_detached || cap.overflow || cap.collect_error) {
-        jw_key_obj(&w, "error");
-        if (incomplete) {
-            jw_key_str(&w, "code", DSLAB_E_INCOMPLETE);
-            jw_key_uint(&w, "expected_samples", actual_samples);
-            jw_key_uint(&w, "received_samples", samples_received);
-        } else if (cap.collect_detached) {
-            jw_key_str(&w, "code", DSLAB_E_USB_DISCONNECTED);
-        } else {
-            jw_key_str(&w, "code", DSLAB_E_OVERFLOW);
+        jw_key_uint(&w, "sample_rate_hz", rate_now ? rate_now : opts->rate_hz);
+        jw_key_str(&w, "channel_mode", mode->name);
+        jw_key_arr(&w, "channels");
+        for (int i = 0; i < opts->channel_count; i++) {
+            char nm[8];
+            snprintf(nm, sizeof(nm), "D%d", opts->channels[i]);
+            jw_str(&w, nm);
+        }
+        jw_arr_end(&w);
+        jw_key_obj(&w, "capture");
+        jw_key_str(&w, "raw_path", path_raw);
+        jw_key_str(&w, "meta_path", path_meta);
+        jw_key_uint(&w, "sample_count", samples_received);
+        jw_key_uint(&w, "byte_count", bytes_on_disk);
+        jw_key_uint(&w, "elapsed_ms", t_end - t_start);
+        jw_key_bool(&w, "triggered", trigger_hit);
+        jw_key_end(&w);
+        jw_key_obj(&w, "channels_detail");
+        for (int i = 0; i < ch_en; i++) {
+            char nm[8];
+            snprintf(nm, sizeof(nm), "D%d", opts->channels[i]);
+            jw_key_obj(&w, nm);
+            jw_key_uint(&w, "transitions", stats ? stats[i].transitions : 0);
+            jw_key_uint(&w, "rising", stats ? stats[i].rising : 0);
+            jw_key_uint(&w, "falling", stats ? stats[i].falling : 0);
+            jw_key_int(&w, "first_edge_sample", stats ? stats[i].first_edge_sample : -1);
+            jw_key_end(&w);
         }
         jw_key_end(&w);
-    } else {
-        jw_key(&w, "error");
-        jw_null(&w);
+        jw_key_arr(&w, "warnings");
+        if (incomplete) jw_str(&w, "INCOMPLETE_CAPTURE: fewer samples than expected");
+        if (cap.overflow) jw_str(&w, "CAPTURE_OVERFLOW: device reported stream overflow");
+        if (static_all) jw_str(&w, "no transitions on any channel (static or unconnected input?)");
+        if (cap.collect_error) jw_str(&w, "collect task ended with error");
+        if (cap.collect_detached) jw_str(&w, "USB device detached during capture");
+        if (cap.packet_errors) jw_str(&w, "malformed packets received");
+        if (timeout_hit && !err_code) jw_str(&w, "capture reached hard timeout");
+        if (stop_by_user) jw_str(&w, "stopped by user request (partial data)");
+        jw_arr_end(&w);
+        if (err_code) {
+            jw_key_obj(&w, "error");
+            jw_key_str(&w, "code", err_code);
+            if (incomplete) {
+                jw_key_uint(&w, "expected_samples", actual_samples);
+                jw_key_uint(&w, "received_samples", samples_received);
+            }
+            jw_key_end(&w);
+        } else {
+            jw_key(&w, "error");
+            jw_null(&w);
+        }
+        jw_obj_end(&w);
+        fputc('\n', stdout);
+        res->printed = 1; /* main() must not print a second JSON */
     }
-    jw_obj_end(&w);
-    fputc('\n', stdout);
-    res->printed = 1; /* main() must not print a second JSON */
 
-    snprintf(res->error_code, sizeof(res->error_code), "%s",
-             incomplete ? DSLAB_E_INCOMPLETE :
-             cap.collect_detached ? DSLAB_E_USB_DISCONNECTED :
-             cap.overflow ? DSLAB_E_OVERFLOW : "");
-    return (incomplete || cap.overflow || cap.collect_error || cap.collect_detached)
-               ? EX_CAPTURE : EX_OK;
+    free(wk.config_fld);
+    free(stats);
+    return exit_code;
+
+fail_device:
+    return EX_DEVICE;
 }
