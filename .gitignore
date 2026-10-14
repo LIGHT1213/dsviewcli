@@ -1,0 +1,23 @@
+# Full upstream clone kept locally for reference (vendored subset is in vendor/)
+upstream/
+
+# Build output
+build/
+build.dir/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+
+# Run artifacts (captures, reports)
+runs/
+
+# Logs
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
