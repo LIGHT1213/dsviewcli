@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "id": "clk-period",
+      "type": "timing.period_range",
+      "channel": "D0",
+      "min_us": 490,
+      "max_us": 510
+    },
+    {
+      "id": "clk-duty",
+      "type": "timing.duty_range",
+      "channel": "D0",
+      "min": 0.45,
+      "max": 0.55
+    },
+    {
+      "id": "no-long-high",
+      "type": "timing.pulse_high_max",
+      "channel": "D0",
+      "max_us": 300
+    }
+  ]
+}
