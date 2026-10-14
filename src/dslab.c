@@ -24,6 +24,7 @@
 #include "capture.h"
 #include "trigger.h"
 #include "session_mgr.h"
+#include "analyze_cmd.h"
 
 #ifndef DSLAB_VERSION
 #define DSLAB_VERSION "0.1.0-m1"
@@ -859,6 +860,16 @@ int main(int argc, char **argv)
         return cmd_doctor(json);
     if (!strcmp(cmd, "capture"))
         return cmd_capture(argc - 2, argv + 2);
+    if (!strcmp(cmd, "analyze")) {
+        if (argc >= 2 && !strcmp(argv[2], "timing"))
+            return cmd_analyze_timing(argc - 3, argv + 3);
+        print_error_json("analyze", "INTERNAL_ERROR", "usage: analyze timing <run> [opts]");
+        return EX_USAGE;
+    }
+    if (!strcmp(cmd, "decode"))
+        return cmd_decode(argc - 2, argv + 2);
+    if (!strcmp(cmd, "assert"))
+        return cmd_assert(argc - 2, argv + 2);
 
     usage(stderr);
     return EX_USAGE;

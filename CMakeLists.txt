@@ -82,6 +82,12 @@ add_executable(dslab
     src/trigger.c
     src/session_mgr.c
     src/unpack.c
+    src/jsparse.c
+    src/runfile.c
+    src/analyze.c
+    src/decode.c
+    src/assert_rules.c
+    src/analyze_cmd.c
 )
 target_compile_definitions(dslab PRIVATE DSLAB_RES_DIR_DEFAULT="${DSLAB_RES_DIR_DEFAULT}")
 target_link_libraries(dslab PRIVATE sigrok4dsl)
@@ -123,4 +129,6 @@ if(Python3_FOUND)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_demo_pipeline.py $<TARGET_FILE:dslab>)
   add_test(NAME async_lifecycle
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_async_lifecycle.py $<TARGET_FILE:dslab>)
+  add_test(NAME analysis_golden
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay/test_analysis_golden.py $<TARGET_FILE:dslab>)
 endif()
