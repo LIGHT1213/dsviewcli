@@ -10,6 +10,9 @@
   发现/能力/3 次一致性采集/触发超时/异步会话/离线分析的真机验收。
 - docs：upstream.md 登记 vendor 补丁与升级重放要求；source-audit §13 增补
   实证缺陷条目；测试报告增补实测反馈章节。
+- 发布链路补齐：Gitea 无 CI，新增 `scripts/publish-gitea-release.sh` 把
+  GitHub CI 产物（含 sha256）镜像到 Gitea Release，幂等可重跑；
+  v0.2.1 已发布至双远端（Gitea release id=7，zip/7z 与 CI 产物逐字节一致）。
 - 修复后真机复测：待设备插入执行验收脚本（软件回归 ctest 5/5 已通过）。
 
 ## 0.2.0 (2026-10-14) — M2–M5（实机验收按用户指示跳过）

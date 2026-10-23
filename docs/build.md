@@ -63,6 +63,29 @@ ctest --test-dir build --output-on-failure
 - macOS：`brew install glib libusb zlib cmake ninja`。
 - 两者均只验证到"可移植的 CMake + pkg-config 结构"层面，尚未在本项目实测构建。
 
+## 发布（双远端）
+
+两个远端的发布机制不同：
+
+- **GitHub**（LIGHT1213/dsviewcli，公开）：有 CI。推送 `v*` tag 后
+  `.github/workflows/build.yml` 的 release job 自动构建 zip/7z 并挂到
+  GitHub Release，全程无需人工操作。
+- **Gitea**（light/dsviewcli，自建）：**没有 CI runner**。用
+  `scripts/publish-gitea-release.sh` 把 GitHub CI 已发布的产物镜像过去：
+
+  ```bash
+  export https_proxy=http://192.168.31.165:7890   # 访问 GitHub 需要
+  GH_TOKEN=<GitHub PAT> scripts/publish-gitea-release.sh v0.2.1
+  ```
+
+  脚本流程：按 tag 从 GitHub Release 下载 CI 产物 → 计算 sha256 →
+  Gitea 上不存在该 release 则创建（notes 含各产物 sha256，单行 ASCII）→
+  逐个上传缺失资产（同名已存在则跳过，可重复执行）。Gitea token 读
+  `~/.config/gitea-ops/config.json`，或用 `GITEA_TOKEN`/`GITEA_HOST` 覆盖。
+
+  发版顺序：commit → 双远端 push → 打 tag 并 push → 等 GitHub CI 的
+  release job 完成 → 跑上面的镜像脚本。
+
 ## 升级上游
 
 更新 `upstream/DSView`（完整克隆，gitignored）→ 同步拷贝到 `vendor/DSView` →
