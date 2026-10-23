@@ -23,3 +23,16 @@
 3. 本项目以 GPL-3.0 衍生作品发布（见 docs/licensing.md），允许完整携带上游源码。
 
 本地开发时可保留完整克隆在 `upstream/DSView`（已 .gitignore），用于比对与升级；升级时同步更新本文件与 `vendor/` 并重新审计。
+
+## 本地补丁（vendor 相对上游 @2e9e2c8e 的差异）
+
+升级 vendor 时**必须重放/复核**以下补丁：
+
+| 文件 | 内容 | 原因 |
+|---|---|---|
+| `libsigrok4DSL/hardware/DSL/dslogic.c` `dev_acquisition_start` | `libusb_get_pollfds()` 判空：返回 NULL（libusb ≥1.0.24 的 Windows 后端不再提供 pollfd）时注册 session 的 fd=-1 空转源泵事件，而不是解引用 NULL | 实机崩溃修复（2026-10-23 用户实测报告：任何 capture 在 "Arm FPGA done" 后段错误；官方 DSView Windows 因静态链 libusb 1.0.23 未受影响。上游 master 同段亦未判空，值得报 issue） |
+| `libsigrok4DSL/hardware/DSL/dslogic.c` `receive_data` | fd<0（空转泵）时 `g_usleep(500)`，避免 freewheel 紧循环 100% 占满 CPU | 同上补丁的配套限速 |
+
+补丁均以 `[dslab patch]` 注释标记，可用
+`diff -u upstream/DSView/libsigrok4DSL/hardware/DSL/dslogic.c vendor/DSView/libsigrok4DSL/hardware/DSL/dslogic.c`
+核对。

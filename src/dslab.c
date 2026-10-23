@@ -27,7 +27,7 @@
 #include "analyze_cmd.h"
 
 #ifndef DSLAB_VERSION
-#define DSLAB_VERSION "0.2.0"
+#define DSLAB_VERSION "0.2.1"
 #endif
 
 static void print_error_json(const char *command, const char *code, const char *message)

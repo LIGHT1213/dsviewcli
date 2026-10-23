@@ -1,9 +1,21 @@
-# 测试报告 — M0–M5（2026-10-14，第二輪）
+# 测试报告 — M0–M5（2026-10-14 第二轮；2026-10-23 实测反馈增补）
 
-> **结论**：软件全链路 PASS（ctest 5/5）；**实机（U2Basic）验收按用户指示
-> SKIPPED**——本机 USB 无 DreamSourceLab 设备，用户明确要求跳过实机验收部分。
-> 因此"实机可用"的宣称条件（计划 §8）尚未满足；设备接入后按 §实机复测清单
-> 执行即可补齐（命令全部现成）。
+> **结论（2026-10-14）**：软件全链路 PASS（ctest 5/5）；实机验收按用户指示 SKIPPED。
+>
+> **2026-10-23 实测反馈（用户在真机调试中发现，见其 err.md）**：dslab 0.2.0
+> 在真实 U2Basic 上**任何 capture 在 "Arm FPGA done" 后一致段错误**——设备与
+> 驱动无罪（官方 DSView 同机采集正常）。根因：libusb ≥1.0.24 的 Windows 后端
+> 移除了 pollfd 仿真，`libusb_get_pollfds()` 恒返回 NULL，libsigrok4DSL
+> `dev_acquisition_start` 不判空直接遍历导致空指针读。官方 DSView Windows 包
+> 静态链 libusb 1.0.23 故不受影响；上游 master 同段也未判空。
+> **已修复（vendor 补丁，见 docs/upstream.md）**：判空 + fd=-1 空转事件泵 +
+> 500µs 限速；软件回归 ctest 5/5 仍绿。用户侧 PoC（假 pollfd 激活空转泵，
+> 100ms×2ch 回流 25088 字节真实样本）已证明数据通路完好，与我们的修复方向一致；
+> 该 PoC 的第三层 use-after-free 源于对静态数组做 g_free——正式补丁由
+> dev_acquisition_start 统一分配/释放，不涉及此问题。
+> **修复后真机复测：待设备插入后执行
+> `tests/hardware/run_hw_acceptance.sh`（一条命令完成发现/能力/3 次采集/
+> 触发超时/异步会话/离线分析，产物落 tests/hardware/results/）。**
 
 ## 运行环境
 

@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 0.2.1 (2026-10-23) — 实机崩溃修复
+
+- **修复真机 capture 段错误**（用户实测定根因）：libusb ≥1.0.24 Windows 后端
+  `libusb_get_pollfds()` 恒 NULL，libsigrok4DSL 不判空即遍历。vendor 补丁：
+  判空 + 注册 session fd=-1 空转事件泵 + freewheel 500µs 限速（防 100% CPU）。
+  官方 DSView Windows 不受影响（静态链 libusb 1.0.23）；上游 master 同段未判空。
+- 新增 `tests/hardware/run_hw_acceptance.sh`：设备插入后一条命令完成
+  发现/能力/3 次一致性采集/触发超时/异步会话/离线分析的真机验收。
+- docs：upstream.md 登记 vendor 补丁与升级重放要求；source-audit §13 增补
+  实证缺陷条目；测试报告增补实测反馈章节。
+- 修复后真机复测：待设备插入执行验收脚本（软件回归 ctest 5/5 已通过）。
+
 ## 0.2.0 (2026-10-14) — M2–M5（实机验收按用户指示跳过）
 
 ### M2 — 异步采集与触发

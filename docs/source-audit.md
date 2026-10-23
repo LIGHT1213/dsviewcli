@@ -131,3 +131,9 @@ datafeed 回调收到的包类型（sigsession.cpp:1393 `data_feed_in`；枚举 
 6. 库日志走 xlog 默认 **stderr**（common/log/xlog.c:74-80），stdout 可安全输出纯 JSON。
 7. 触发公共 API：`ds_trigger_probe_set/stage_set_value/set_en/set_pos/...`（libsigrok.h:1261-1272），通道 trigger 字符串 sigrok-cli 语法（dsdevice.c:150 注释）。
 8. 采集结束只有事件回调（无阻塞 wait API）；CLI 需自行实现带超时的事件等待（M1 用轮询 `ds_is_collecting` + 事件标志）。
+9. **【2026-10-23 实机证实】`dev_acquisition_start` 对 `libusb_get_pollfds()`
+   不判空**（dslogic.c:1489）：libusb ≥1.0.24 的 Windows 后端移除了 pollfd
+   仿真（恒返回 NULL），直接遍历即段错误——官方 DSView Windows 包因静态链
+   libusb 1.0.23 而幸免。dslab 已打 vendor 补丁（判空 + fd=-1 空转泵 + 限速，
+   见 docs/upstream.md）；`dscope.c:2091` 存在同型代码，本项目未改（无 DSCope
+   设备验证），升级/复用时注意。上游 issue 待报。

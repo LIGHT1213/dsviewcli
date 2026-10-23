@@ -1344,8 +1344,14 @@ static int receive_data(int fd, int revents, const struct sr_dev_inst *sdi)
     uint8_t hw_info;
     int ret;
 
-    (void)fd;
     (void)revents;
+
+    /* [dslab patch] fd < 0 = freewheel dummy source (libusb >= 1.0.24 on
+     * Windows): sr_session_run() would otherwise spin at 100% CPU between
+     * libusb events. 500us throttles the pump; stream transfers arrive in
+     * ~20ms chunks, so this adds no meaningful latency. */
+    if (fd < 0)
+        g_usleep(500);
 
     drvc = di->priv;
     devc = sdi->priv;
@@ -1487,20 +1493,40 @@ static int dev_acquisition_start(struct sr_dev_inst *sdi, void *cb_data)
 
     /* setup callback function for data transfer */
     lupfd = libusb_get_pollfds(drvc->sr_ctx->libusb_ctx);
-    for (i = 0; lupfd[i]; i++);
+    /* [dslab patch] libusb >= 1.0.24 removed pollfd emulation on Windows:
+     * libusb_get_pollfds() returns NULL there and the old count loop below
+     * dereferenced it, crashing every capture right after "Arm FPGA done".
+     * (Official DSView Windows builds link libusb 1.0.23 which still provides
+     * emulated pollfds, which is why the GUI kept working.) With no pollfds
+     * we register the session's dummy source (fd = -1): sr_session_run()
+     * then freewheels over receive_data(), which pumps
+     * libusb_handle_events_timeout_completed() for the actual transfers. */
+    if (lupfd != NULL) {
+        for (i = 0; lupfd[i]; i++);
+    } else {
+        sr_info("libusb provides no pollfds (libusb >= 1.0.24 on Windows); "
+                "using the fd=-1 freewheel event pump.");
+        i = 0;
+    }
 
     if (!(devc->usbfd = g_try_malloc0(sizeof(struct libusb_pollfd) * (i + 1)))){
         sr_err("%s,ERROR:failed to alloc memory.", __func__);
     	return SR_ERR;
     }
 
-    for (i = 0; lupfd[i]; i++) {
-        sr_source_add(lupfd[i]->fd, lupfd[i]->events,
-                  dsl_get_timeout(sdi), receive_data, sdi);
-        devc->usbfd[i] = lupfd[i]->fd;
+    if (lupfd != NULL) {
+        for (i = 0; lupfd[i]; i++) {
+            sr_source_add(lupfd[i]->fd, lupfd[i]->events,
+                      dsl_get_timeout(sdi), receive_data, sdi);
+            devc->usbfd[i] = lupfd[i]->fd;
+        }
+    } else {
+        sr_source_add(-1, 0, dsl_get_timeout(sdi), receive_data, sdi);
+        i = 0; /* devc->usbfd[0] = -1 marks "no fds to remove" */
     }
     devc->usbfd[i] = -1;
-    g_free(lupfd);
+    if (lupfd != NULL)
+        g_free(lupfd);
 
     wr_cmd.header.dest = DSL_CTL_START;
     wr_cmd.header.size = 0;
